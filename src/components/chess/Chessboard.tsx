@@ -1,12 +1,10 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
-import { getValidMoves, executeMove } from './GameLogic';
-
-import Square from './Square';
 import { ChessEngineInstance } from '../../logic/ChessEngine';
 import { GameState } from '../../models/GameState';
 import { PieceColor } from '../../models/Piece';
 import soundManager from '../../services/SoundManager';
 import ChessApi from '../../services/chessApi';
+import Square from './Square';
 
 // Board letters and numbers for algebraic notation
 const boardLetters = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
@@ -22,6 +20,9 @@ const Chessboard = () => {
     window.addEventListener('pointerdown', enableAudio, { once: true });
     return () => window.removeEventListener('pointerdown', enableAudio);
   }, []);
+
+  const lastSelectedSquare = useRef<string | null>(null);
+  const mouseDownOnSelected = useRef(false);
 
   // Handle mouse movement during drag
   const handleMouseMove = (evt: MouseEvent) => {
@@ -113,76 +114,42 @@ const Chessboard = () => {
     (moveString: string, stateOverride?: GameState) => {
       const from = moveString.slice(0, 2);
       const to = moveString.slice(2, 4);
-      const promotion = moveString.length > 4 ? moveString.slice(4) : null;
 
-      // Use the most up-to-date state
-      const baseState = stateOverride || ChessEngineInstance.getGameState();
-      let updatedGameState = { ...baseState };
+      // Ensure engine has latest state
+      if (stateOverride) {
+        ChessEngineInstance.setGameState(stateOverride);
+      }
+      const baseState = ChessEngineInstance.getGameState();
 
-      let moveResult = null;
-      if (promotion) {
-        moveResult = executeMove(
-          from,
-          to,
-          updatedGameState,
-          updatedGameState.currentPlayer
-        );
+      const result = ChessEngineInstance.makeMove(from, to);
+      if (!result || !result.isValid) return;
+
+      const updatedGameState = result.newGameState;
+      setGameState(updatedGameState);
+      ChessEngineInstance.setGameState(updatedGameState);
+
+      // Sounds
+      const mover = baseState.currentPlayer; // bot just moved
+      const opponentInCheck =
+        mover === 'white'
+          ? updatedGameState.blackKingInCheck
+          : updatedGameState.whiteKingInCheck;
+
+      if (updatedGameState.checkmate) {
+        soundManager.playMoveSound('checkmate');
+      } else if (opponentInCheck) {
+        soundManager.playMoveSound('check');
+      } else if (
+        result.moveType === 'capture' ||
+        result.moveType === 'en-passant'
+      ) {
+        soundManager.playMoveSound('capture');
+      } else if (result.moveType === 'castle') {
+        soundManager.playMoveSound('castle');
+      } else if (result.moveType === 'promotion') {
+        soundManager.playMoveSound('promote');
       } else {
-        moveResult = executeMove(
-          from,
-          to,
-          updatedGameState,
-          updatedGameState.currentPlayer
-        );
-      }
-
-      if (moveResult && moveResult.moveResult) {
-        const result = moveResult.moveResult;
-        if (result.isCheckMate) {
-          soundManager.playMoveSound('gameEnd');
-        } else if (result.isCheck) {
-          soundManager.playMoveSound('check');
-        } else if (
-          result.moveType === 'capture' ||
-          result.moveType === 'en-passant'
-        ) {
-          soundManager.playMoveSound('capture');
-        } else if (result.moveType === 'castle') {
-          soundManager.playMoveSound('castle');
-        } else if (result.moveType === 'promotion') {
-          soundManager.playMoveSound('promote');
-        } else {
-          soundManager.playMoveSound('opponentMove');
-        }
-      }
-
-      if (moveResult && moveResult.updatedGameState) {
-        // DEBUG: Log drag/bot move state before mouseup dispatch
-        console.log(
-          '[executeBotMove] isDraggingRef:',
-          isDraggingRef.current,
-          'draggingFromSquareRef:',
-          draggingFromSquareRef.current,
-          'botToSquare:',
-          to,
-          'botMoveType:',
-          moveResult.moveResult?.moveType
-        );
-        // Clean up any active user drag state when bot makes a move
-        const botToSquare = to;
-        const botMoveType = moveResult.moveResult?.moveType;
-        const userDragging =
-          isDraggingRef.current && draggingFromSquareRef.current;
-
-        // Update React state
-        setGameState(moveResult.updatedGameState);
-
-        // Sync engine state with new board
-        ChessEngineInstance.setGameState({
-          ...ChessEngineInstance.getGameState(),
-          boardArray: moveResult.updatedGameState.boardArray,
-          currentPlayer: moveResult.updatedGameState.currentPlayer,
-        } as any);
+        soundManager.playMoveSound('opponentMove');
       }
     },
     []
@@ -350,7 +317,17 @@ const Chessboard = () => {
       }
     }
 
-    if (targetSquare === lastMouseDownSquare.current) {
+    if (
+      targetSquare === lastMouseDownSquare.current &&
+      targetSquare === gameState.selectedSquare
+    ) {
+      // Deselect if mouse up on the selected square
+      setGameState((prev) => ({
+        ...prev,
+        selectedSquare: null,
+        validMoves: [],
+        highlightedSquares: [],
+      }));
       draggingPieceRef.current = null;
       draggingFromSquareRef.current = null;
       setIsDragging(false);
@@ -385,13 +362,21 @@ const Chessboard = () => {
 
     // If we already have a selected square, try to make a move
     if (gameState.selectedSquare) {
+      console.log(
+        'Attempting move from',
+        gameState.selectedSquare,
+        'to',
+        squareName
+      );
+
       const fromSquare = gameState.selectedSquare;
       const toSquare = squareName;
 
       // Don't do anything if clicking the same square twice
       if (fromSquare === toSquare) {
         sameSquareCounter++;
-        // Deselect
+        console.log('Clicked the same square:', squareName);
+
         if (sameSquareCounter > 1) {
           const updatedGameState = { ...gameState };
           updatedGameState.selectedSquare = null;
@@ -435,29 +420,20 @@ const Chessboard = () => {
   // Helper function to select a square and calculate valid moves
   const selectSquare = (squareName: string) => {
     const piece = ChessEngineInstance.getPieceAtPosition(squareName);
-
-    // Only select squares with pieces of the current player
     if (piece) {
       const pieceColor = piece[0] === 'W' ? 'white' : 'black';
       if (pieceColor === gameState.currentPlayer) {
-        // Play a subtle selection sound
-
         const updatedGameState = { ...gameState };
         updatedGameState.selectedSquare = squareName;
 
-        // Get valid moves from GameLogic
-        // Convert boardArray to string[][] (replace nulls with empty string)
-        const boardArrayString = gameState.boardArray.map((row) =>
-          row.map((cell) => cell || '')
-        );
-        const validMoves = getValidMoves(piece, squareName, boardArrayString);
+        // Engine valid moves (fully legal)
+        const validMoves = ChessEngineInstance.getValidMoves(piece, squareName);
         updatedGameState.validMoves = validMoves;
-        validSquaresRef.current = validMoves; // Store valid moves for drag-drop
+        validSquaresRef.current = validMoves;
         updatedGameState.highlightedSquares = [squareName];
 
         setGameState(updatedGameState);
       } else {
-        // Not player's turn or piece
         soundManager.playMoveSound('illegalMove');
       }
     }
@@ -466,18 +442,18 @@ const Chessboard = () => {
   // Select square and show available moves (not necessarily legal)
   const selectSquareWithAvailableMoves = (squareName: string) => {
     const piece = ChessEngineInstance.getPieceAtPosition(squareName);
-
     if (piece) {
       const updatedGameState = { ...gameState };
       updatedGameState.selectedSquare = squareName;
 
-      // Get available moves (no full validation)
-      const availableMoves = ChessEngineInstance.getAvailableMoves(
+      // Premove moves (wide, ignores checks)
+      const availableMoves = ChessEngineInstance.getPremoveMoves(
         piece,
         squareName
       );
+
       updatedGameState.validMoves = availableMoves;
-      validSquaresRef.current = availableMoves; // Store available moves for drag-drop
+      validSquaresRef.current = availableMoves;
       updatedGameState.highlightedSquares = [squareName];
 
       console.log(
@@ -740,40 +716,32 @@ const Chessboard = () => {
     const isNormalMove = currentPieceColor === gameState.currentPlayer;
 
     if (isNormalMove) {
-      // Normal move: execute immediately
       console.log(
         `[handleDrop] Normal move from ${fromSquare} to ${dropSquare}`
       );
 
-      // Use GameLogic to execute the move
-      const moveResult = executeMove(
-        fromSquare,
-        dropSquare,
-        gameState,
-        gameState.currentPlayer
-      );
-
-      if (!moveResult) {
+      const result = ChessEngineInstance.makeMove(fromSquare, dropSquare);
+      if (!result || !result.isValid) {
         console.log('❌ Move not allowed');
         return;
       }
 
-      const { updatedGameState, moveResult: result } = moveResult;
+      const updatedGameState = result.newGameState;
 
-      // Update React state
+      // Update React state and engine state
       setGameState(updatedGameState);
+      ChessEngineInstance.setGameState(updatedGameState);
 
-      // Sync engine state with new board
-      ChessEngineInstance.setGameState({
-        ...ChessEngineInstance.getGameState(),
-        boardArray: updatedGameState.boardArray,
-        currentPlayer: updatedGameState.currentPlayer,
-      } as any);
+      // Sounds based on result + post-move state
+      const mover = gameState.currentPlayer;
+      const opponentInCheck =
+        mover === 'white'
+          ? updatedGameState.blackKingInCheck
+          : updatedGameState.whiteKingInCheck;
 
-      // Play move sound (existing sound logic)
-      if (result.isCheckMate) {
-        soundManager.playMoveSound('gameEnd');
-      } else if (result.isCheck) {
+      if (updatedGameState.checkmate) {
+        soundManager.playMoveSound('checkmate');
+      } else if (opponentInCheck) {
         soundManager.playMoveSound('check');
       } else if (
         result.moveType === 'capture' ||
@@ -793,27 +761,23 @@ const Chessboard = () => {
         botColorRef.current = updatedGameState.currentPlayer;
       }
 
-      // Clean up drag state BEFORE bot move to prevent interference
       setIsDragging(false);
       draggingPieceRef.current = null;
       draggingFromSquareRef.current = null;
       document.body.style.cursor = 'grab';
 
-      // If playing against computer, make AI move after drag cleanup
       if (
         gameState.gameMode === 'ai' &&
         botColorRef.current === updatedGameState.currentPlayer
       ) {
-        // Add human-like thinking delay (500-2000ms)
-        const thinkingDelay = Math.random() * 1500 + 500; // Random between 500-2000ms
+        const thinkingDelay = Math.random() * 1500 + 500;
         console.log(`[Bot] Thinking for ${Math.round(thinkingDelay)}ms...`);
-
         setTimeout(() => {
           makeBotMove(updatedGameState);
         }, thinkingDelay);
       }
 
-      // Remove any lingering drag image and .dragging class
+      // Clean up drag visuals
       document
         .querySelectorAll('.custom-drag-image')
         .forEach((el) => el.remove());
@@ -821,17 +785,14 @@ const Chessboard = () => {
         .querySelectorAll('.dragging')
         .forEach((el) => el.classList.remove('dragging'));
       document.querySelectorAll('img').forEach((img) => {
-        if (img.style.position === 'fixed') img.remove();
+        if ((img as HTMLImageElement).style.position === 'fixed') img.remove();
       });
-      // Force mouseup event to end any browser drag
       window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-
-      // Force React to update board state immediately after drag cleanup
       window.requestAnimationFrame(() => {
         setGameState(updatedGameState);
       });
     } else {
-      // Not player's turn: queue as premove if it's a valid player piece and move
+      // Not player's turn: queue as premove; fallback uses premove moves
       console.log('[handleDrop] Debug premove check:', {
         currentPieceColor,
         playerRefCurrent: playerRef.current,
@@ -859,10 +820,10 @@ const Chessboard = () => {
           const premovePiece =
             ChessEngineInstance.getPieceAtPosition(fromSquare);
           const available = premovePiece
-            ? ChessEngineInstance.getAvailableMoves(premovePiece, fromSquare)
+            ? ChessEngineInstance.getPremoveMoves(premovePiece, fromSquare)
             : [];
           canQueuePremove = available.includes(dropSquare);
-          console.log('[handleDrop] Fallback available moves for premove', {
+          console.log('[handleDrop] Fallback premove moves', {
             fromSquare,
             available,
           });

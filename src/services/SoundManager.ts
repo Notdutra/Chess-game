@@ -1,15 +1,16 @@
 import { getBasePath } from '../utils/paths';
 
 const SOUND_NAMES = [
-  'playerMove',
-  'opponentMove',
   'capture',
   'castle',
   'check',
-  'promote',
   'gameEnd',
-  'illegalMove',
   'gameStart',
+  'illegalMove',
+  'opponentMove',
+  'playerMove',
+  'premove',
+  'promote',
 ];
 
 class SoundManager {
@@ -84,29 +85,22 @@ class SoundManager {
       | 'capture'
       | 'castle'
       | 'check'
+      | 'checkmate'
       | 'gameEnd'
       | 'gameStart'
       | 'illegalMove'
       | 'opponentMove'
       | 'playerMove'
+      | 'premove'
       | 'promote'
   ): void {
-    switch (moveType) {
-      case 'capture':
-      case 'castle':
-      case 'check':
-      case 'gameEnd':
-      case 'gameStart':
-      case 'illegalMove':
-      case 'opponentMove':
-      case 'playerMove':
-      case 'promote':
-        this.play(moveType, 1);
-        break;
-      default:
-        this.play('playerMove', 1);
-        break;
+    if (moveType === 'checkmate') {
+      this.play('check', 1);
+      this.play('gameEnd', 1);
+      return;
     }
+    const sound = SOUND_NAMES.includes(moveType) ? moveType : 'playerMove';
+    this.play(sound, 1);
   }
 
   playGameStateSound(state: 'start' | 'end' | 'draw'): void {
